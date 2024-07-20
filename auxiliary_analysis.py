@@ -13,7 +13,32 @@ from PIL import Image
 from scipy.spatial import distance
 import matplotlib.pyplot as plt
 
-def zscore_threshold(nd_array, dim, threshold):
+def show_conf_info(file_name):
+  ''' Given a confusion matrix's file_name, prints accuracy information
+    :param: file_name
+    '''
+  confusion = np.genfromtxt(file_name, delimiter=',')
+  print(f'Session {i} analysed:')
+  print(f'Accuracy of the upright stimuli is {np.mean(squareform(confusion[0:50,0:50]))*100:.4f}%')
+  print(f'Accuracy of the upright unfamiliary stimuli is {np.mean(squareform(confusion[0:25,0:25]))*100:.4f}%')
+  print(f'Accuracy of the upright famous stimuli is {np.mean(squareform(confusion[25:50,25:50]))*100:.4f}%')
+  print(f'Accuracy of the inverted stimuli is {np.mean(squareform(confusion[50:,50:]))*100:.4f}%')
+  print(f'Accuracy of the inverted unfamiliar stimuli is {np.mean(squareform(confusion[50:75,50:75]))*100:.4f}%')
+  print(f'Accuracy of the inverted famous stimuli is {np.mean(squareform(confusion[75:,75:]))*100:.4f}%')
+  print(f'Accuracy of the entire set is {np.mean(squareform(confusion))*100:.4f}%')
+
+  # Correlation results
+  corr=np.corrcoef(squareform(confusion[0:25,0:25]),squareform(confusion[50:75,50:75]))
+  print(f'Correlation between identity discrimination in upright and inverted famous faces is {corr[0,1]:.3f}')
+  corr=np.corrcoef(squareform(confusion[25:50,25:50]),squareform(confusion[75:100,75:100]))
+  print(f'Correlation between identity discrimination in upright and inverted unfamiliar faces is {corr[0,1]:.3f}')
+
+def find_folder():
+    infolder = '/Volumes/T7/UofT/Data'
+    outfolder = './'
+    return (infolder, outfolder)
+
+def zscore_threshold(nd_array, dim, threshold, time = False):
     ''' Returns a matrix with zscored and thresholded values along 
         the specified directions.
     :param: nd_array - data
@@ -21,89 +46,103 @@ def zscore_threshold(nd_array, dim, threshold):
             threshold - threshold value
     :return: max - zscored and thresholded array with the original nd_array dimensions
     '''
-    print(nd_array.shape)
-    dims = np.arange(len(nd_array.shape))
-    dimleft = np.setdiff1d(dims, dim)
-    if not isinstance(dim,list):
-        dim=[dim]
-    new_order = [*dim, *dimleft]
-    mat = np.transpose(nd_array,tuple(new_order))
-    incl = [nd_array.shape[i] for i in dim]
-    new = [nd_array.shape[i] for i in dimleft]
-    new.insert(0, np.prod(incl))
-    mat = np.reshape(mat, new, order='F')
-    mat = stats.zscore(mat, axis=0)
-    mat[mat>threshold] = threshold
-    mat[mat<-threshold] = -threshold
-    new = [nd_array.shape[i] for i in dimleft]
-    new = incl + new
-    mat = np.reshape(mat,tuple(new), order='F')
-    new_order=np.argsort(new_order,axis=0)
-    mat = np.transpose(mat, (new_order))
-    return mat
+    old_dims = nd_array.shape
+    if (time):
+        nd_array = nd_array.reshape([old_dims[0], old_dims[1], -1, 5], order='F')
+    if isinstance(dim,list):
+        dim = tuple(dim)
+    mat = stats.zscore(nd_array, axis=dim)
+    mat[mat>3] = 3
+    mat[mat<-3] = -3
+    return mat.reshape([old_dims[0], old_dims[1], old_dims[2]], order='F')
 
-def block_average(epochs, num_trials, num_blocks, kind, zscore = False, threshold = False):
+def normalize_epochs(epochs, threshold = None, normalizer = stats.zscore):
+  ''' Z-scores within time X els, replaces threshshold (if provided)
+    :param epochs: epochs structure
+    :param threshold: the threshold absolute z-value. Everything above is threshold, 
+                        under is -threshold. Default - False
+    :param normalizer: EEG image normalizer. arg1 = data, arg2 = axis.
+    :return epochs: - MNE epochs structure 
+  '''
+
+  assert (threshold is None) or (threshold >= 0), "threshold should be non-negative"
+  assert (type(epochs) in [mne.epochs.EpochsFIF, mne.epochs.EpochsArray]), "epochs should be MNE.epochs structure"
+
+  data = epochs.get_data()
+  original_shape = data.shape
+  data = data.reshape(-1, data.shape[-1])
+  data = normalizer(data, axis = 1)
+
+  if threshold is not None:
+    data[np.abs(data) > threshold] = threshold * np.sign(data[np.abs(data) > threshold])
+  
+  data = data.reshape(original_shape)
+  normalized_epochs = mne.EpochsArray(data, epochs.info, events=epochs.events,
+                                 event_id=epochs.event_id, tmin=epochs.tmin)
+  return normalized_epochs
+
+def block_average(epochs, num_trials, random_pick = False):
     ''' Z-scores within time X els, replaces threshshold (if provided) and averages 
         trials within blocks. 
     :param epochs: epochs structure
     :param num_trials: number of trials to average
-    :param num_blocks: number of blochs in the data
-    :param items_n: number of unique triggers
-    :param zscore: to perform zscoring across time X els. Default - False
-    :param threshold: the threshold absolute z-value. Everything above is threshold, 
-                        under is -threshold. Default - False
+    :param num_blocks: number of blocks in the data
+    :param random_pick: enables randomly picking the trials
     :return epochs: - MNE epochs structure 
-    
-    >>> epochs_02 = block_average(epochs_02,4,11, zscore = True, threshold = 3)
     '''
     
-    if kind == 'perc':
-        items_n = 100
-    else:
-        items_n = 5
-    print('Starting averaging')
-    df = epochs.to_data_frame()
-    df = df.unstack(level = -1)
-    df['block']=np.tile(np.arange(1,num_blocks+1).repeat(num_trials),items_n)
-    df.reset_index(inplace=True)
-    df['condition']=df['condition'].apply(pd.to_numeric)
-    if zscore:
-        arr = df.iloc[:,2:-1].values
-        arr = stats.zscore(arr,axis=1)
-        if threshold:
-            arr[np.where(arr>threshold)]=threshold
-            arr[np.where(arr<-threshold)]=-threshold
+    # Create a new EpochsArray to store the averaged epochs
+    averaged_data = []
+    averaged_events = []
+    # Iterate over conditions
+    for condition in epochs.event_id.keys():
+        condition_epochs = epochs[condition]
+        observations = len(condition_epochs.get_data())
+        if (observations % num_trials == 0):
+            # Reshape to group epochs into sets of num_trials
+            reshaped_data = condition_epochs.get_data().reshape(-1, num_trials, *condition_epochs.get_data().shape[1:])
+            reshaped_events = condition_epochs.events.reshape(-1, num_trials, condition_epochs.events.shape[1])
+            # Calculate the average across each group of num_trials
+            averaged_condition_data = np.mean(reshaped_data, axis=1)
+            averaged_condition_events = reshaped_events[:, 0, :] # Keep only the first event of each group
+            # Append to the new data and events lists
+            averaged_data.append(averaged_condition_data)
+            averaged_events.append(averaged_condition_events)
         else:
-            print('No thresholding performed')
-        df.iloc[:,2:-1]=arr
-    else:
-        print('No zscoring performed')
-    df=df.groupby(['block','condition']).mean()
-    df.reset_index(inplace=True)
-    data = np.array(df.iloc[:,3:].values)
-    data = data.reshape(data.shape[0],64,int(data.shape[1]/64))
-    
-    if kind == 'perc':
-        east=list(np.arange(101,126))+list(np.arange(201,226))
-        df['orientation']=np.where(df['condition']>200,'inv','up')
-        df['origin']=np.where(df['condition'].isin(east),'east','west')
-        trigs=list(range(101, 151))+list(range(201, 251))
-    else: 
-        trigs=list(range(31, 36))
-    event_ids={str(x):x for x in trigs}
-        
-    # Initialize an info structure
-    events = np.array([np.arange(len(df.condition)),np.zeros(len(df.condition),),df.condition]).transpose()
-    events = events.astype('int')
-    epochs = mne.EpochsArray(data, info=epochs.info, events=events, tmin = epochs.tmin)
-    epochs.apply_baseline()
-    '''
-    if kind == 'perc':
-        epochs.metadata = df[['block','condition','orientation','origin']]
-    else:
-        epochs.metadata = df[['block','condition']]
-        '''
-    return epochs
+            # Append full blocks
+            number_of_full_blocks = observations // num_trials
+            last_block_size = observations - number_of_full_blocks*num_trials
+
+            reshaped_data = condition_epochs.get_data()[:-last_block_size].reshape(-1, num_trials, *condition_epochs.get_data()[:-last_block_size].shape[1:])
+            reshaped_events = condition_epochs.events[:-last_block_size].reshape(-1, num_trials, condition_epochs.events[:-last_block_size].shape[1])
+
+            averaged_condition_data = np.mean(reshaped_data, axis=1)
+            averaged_condition_events = reshaped_events[:, 0, :]
+
+            averaged_data.append(averaged_condition_data)
+            averaged_events.append(averaged_condition_events)
+
+            # Append last block
+            reshaped_data = condition_epochs.get_data()[-last_block_size:].reshape(-1, last_block_size, *condition_epochs.get_data()[-last_block_size:].shape[1:])
+            reshaped_events = condition_epochs.events[-last_block_size:].reshape(-1, last_block_size, condition_epochs.events[-last_block_size:].shape[1])
+
+            averaged_condition_data = np.mean(reshaped_data, axis=1)
+            averaged_condition_events = reshaped_events[:, 0, :]
+
+            averaged_data.append(averaged_condition_data)
+            averaged_events.append(averaged_condition_events)
+
+    # Combine the averaged data and create a new EpochsArray
+    averaged_data = np.concatenate(averaged_data, axis=0)
+    averaged_events = np.concatenate(averaged_events, axis=0)
+    # Ensure events are sorted by time
+    sort_order = np.argsort(averaged_events[:, 0])
+    averaged_data = averaged_data[sort_order]
+    averaged_events = averaged_events[sort_order]
+    info = epochs.info  # Copy metadata (channel names, sampling rate, etc.)
+    averaged_epochs = mne.EpochsArray(averaged_data, info, events=averaged_events,
+                                    event_id=epochs.event_id, tmin=epochs.tmin)
+    return averaged_epochs
 
 def preprocessing_eeg(fname, event_ids, events=None, segment_times=(-0.1,1), 
                       filt=(0.1,40), crop=None, resample = False):
@@ -175,13 +214,13 @@ def run_eeg_svm(X, Y, cv, aver_n_trials=False, n_pca=False, fft=False):
     if n_pca:
         pca = PCA(n_components = n_pca)
         dataIn = pca.fit_transform(dataIn)
-    else:
-        print('No PCA')
+    # else:
+    #     print('No PCA')
         
     if fft:
         dataIn = np.abs(np.fft.fft(dataIn))
-    else:
-        print('No fft')
+    # else:
+    #     print('No fft')
         
     labelsIn = Y
     results = list()
@@ -189,21 +228,21 @@ def run_eeg_svm(X, Y, cv, aver_n_trials=False, n_pca=False, fft=False):
     clf = LinearSVC(C=1.0)
     nums = len(list(itertools.combinations(np.unique(labelsIn), 2)))
     for idx, i in enumerate(itertools.combinations(np.unique(labelsIn), 2)):
-        print(i)
+        # print(i)
         X = dataIn[np.logical_or(labelsIn==i[0], labelsIn==i[1]),:]
         Y = labelsIn[np.logical_or(labelsIn==i[0], labelsIn==i[1])]
         if aver_n_trials:
             X,Y=aver_trials_2D_mat(X,Y,aver_n_trials)
         scores = cross_val_score(clf, X, Y, cv=cv, scoring='accuracy')
         results.append(scores.mean())
-        update_progress(idx / nums)
+        # update_progress(idx / nums)
     
-    update_progress(1)
+    # update_progress(1)
     confusion = squareform(np.array(results))
     duration=time.time() - t
     duration=duration/60
-    print(f'The overall accuracy is {np.mean(squareform(confusion))*100:.1f} and' +
-          f' the duration is {duration:.1f} minutes')
+    # print(f'The overall accuracy is {np.mean(squareform(confusion))*100:.1f} and' +
+    #       f' the duration is {duration:.1f} minutes')
     return (confusion, duration)
 
 def convert_epochs_to_2D_array(epochs, times=(0.05,0.65), dims=False, threshold=3,pick_ch=[]):
@@ -347,7 +386,7 @@ def convert_to_pandas(epochs, num_trials, num_blocks, items_n, average=False,
     df['origin']=np.where(df['condition'].isin(east),'east','west')
     return df
 
-def zscore_threshold_epochs(epochs, dims, threshold):
+def zscore_threshold_epochs(epochs, dims, threshold, time = False):
     ''' Returns a matrix with zscored and thresholded values along 
         the specified directions.
     Args:
@@ -365,7 +404,7 @@ def zscore_threshold_epochs(epochs, dims, threshold):
         print('No metadata is found')
         
     data = epochs.get_data()
-    data = zscore_threshold(data, dims, threshold)
+    data = zscore_threshold(data, dims, threshold, time = time)
     epochs = mne.EpochsArray(data, epochs.info, events=epochs.events, tmin = epochs.tmin)
     epochs.metadata = temp
         
